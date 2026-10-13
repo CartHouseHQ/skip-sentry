@@ -13,6 +13,7 @@ final class SkipSentryTests: XCTestCase {
     func testSkipSentry() throws {
         #if !SKIP
         SkipSentry.start(debug: true)
+        SkipSentry.close()
         #endif
         // On Android, start() requires a real Android context (not available in Robolectric)
     }
@@ -101,6 +102,7 @@ final class SkipSentryTests: XCTestCase {
         SkipSentry.start { opts in
             opts.debug = true
         }
+        SkipSentry.close()
         #endif
         // On Android, start() requires a real Android context (not available in Robolectric)
     }
