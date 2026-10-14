@@ -1,5 +1,8 @@
 // Copyright 2023–2026 Skip
 // SPDX-License-Identifier: MPL-2.0
+
+// Sentry Cocoa is a binary xcframework with no Android slice, so on a native
+// (non-transpiled) Android build there is nothing to wrap and the module is empty.
 #if !SKIP_BRIDGE
 import Foundation
 
@@ -68,12 +71,18 @@ public class SkipSentry {
             if let rel = opts.release { options.releaseName = rel }
             if let dist = opts.dist { options.dist = dist }
             if let rate = opts.sampleRate { options.sampleRate = NSNumber(value: rate) }
+            if let tracesRate = opts.tracesSampleRate { options.tracesSampleRate = NSNumber(value: tracesRate) }
             options.enableAutoSessionTracking = opts.enableAutoSessionTracking
             if let interval = opts.sessionTrackingIntervalMillis {
                 options.sessionTrackingIntervalMillis = UInt(interval)
             }
             options.attachStacktrace = opts.attachStacktrace
             options.enableAppHangTracking = opts.enableAppHangTracking
+            if opts.beforeSend != nil {
+                options.beforeSend = { event in
+                    Self.applyBeforeSend(opts, event)
+                }
+            }
         }
         #else
         initSentryAndroid(opts: opts)
@@ -184,6 +193,31 @@ public class SkipSentry {
         crumb.message = message
         crumb.category = category
         crumb.level = toKotlinLevel(level)
+        Sentry.addBreadcrumb(crumb)
+        #endif
+    }
+
+    /// Add a breadcrumb with category, level, and structured data.
+    ///
+    /// - Parameters:
+    ///   - message: A short description of the breadcrumb.
+    ///   - category: A dot-separated category string (e.g. `"ui.click"`, `"navigation"`).
+    ///   - level: The severity level.
+    ///   - data: Additional key/value context attached to the breadcrumb.
+    public static func addBreadcrumb(message: String, category: String, level: SkipSentryLevel = .info, data: [String: String]) {
+        #if !SKIP
+        let crumb = Sentry.Breadcrumb(level: toiOSLevel(level), category: category)
+        crumb.message = message
+        crumb.data = data
+        SentrySDK.addBreadcrumb(crumb)
+        #else
+        let crumb = Breadcrumb()
+        crumb.message = message
+        crumb.category = category
+        crumb.level = toKotlinLevel(level)
+        for (key, value) in data {
+            crumb.setData(key, value)
+        }
         Sentry.addBreadcrumb(crumb)
         #endif
     }
@@ -316,6 +350,31 @@ public class SkipSentry {
         case .fatal: return .fatal
         }
     }
+
+    private static func fromiOSLevel(_ level: Sentry.SentryLevel) -> SkipSentryLevel? {
+        switch level {
+        case .debug: return .debug
+        case .info: return .info
+        case .warning: return .warning
+        case .error: return .error
+        case .fatal: return .fatal
+        default: return nil // .none / unknown
+        }
+    }
+
+    /// Map a native Cocoa `Event` into the bridgeable ``SkipSentryEvent`` wrapper,
+    /// invoke the consumer's `beforeSend` hook, and either keep the original native
+    /// event (hook returned non-nil) or drop it (hook returned nil). Wired into
+    /// `Options.beforeSend` in `start(configure:)`.
+    static func applyBeforeSend(_ opts: SkipSentryOptions, _ event: Sentry.Event) -> Sentry.Event? {
+        guard let beforeSend = opts.beforeSend else { return event }
+        var exceptions: [SkipSentryException] = []
+        for exception in event.exceptions ?? [] {
+            exceptions.append(SkipSentryException(type: exception.type, value: exception.value))
+        }
+        let wrapper = SkipSentryEvent(message: event.message?.formatted, level: fromiOSLevel(event.level), exceptions: exceptions)
+        return beforeSend(wrapper) == nil ? nil : event
+    }
     #else
     private static func toKotlinLevel(_ level: SkipSentryLevel) -> SentryLevel {
         switch level {
@@ -325,6 +384,30 @@ public class SkipSentry {
         case .error: return SentryLevel.ERROR
         case .fatal: return SentryLevel.FATAL
         }
+    }
+
+    private static func fromKotlinLevel(_ level: SentryLevel?) -> SkipSentryLevel? {
+        guard let level = level else { return nil }
+        if level == SentryLevel.DEBUG { return .debug }
+        if level == SentryLevel.INFO { return .info }
+        if level == SentryLevel.WARNING { return .warning }
+        if level == SentryLevel.ERROR { return .error }
+        if level == SentryLevel.FATAL { return .fatal }
+        return nil
+    }
+
+    /// Map a native Android `SentryEvent` into the bridgeable ``SkipSentryEvent``
+    /// wrapper, invoke the consumer's `beforeSend` hook, and either keep the
+    /// original native event (hook returned non-nil) or drop it (hook returned nil).
+    /// Wired into `SentryOptions.setBeforeSend` in `initSentryAndroid(opts:)`.
+    static func applyBeforeSend(_ opts: SkipSentryOptions, _ event: SentryEvent) -> SentryEvent? {
+        guard let beforeSend = opts.beforeSend else { return event }
+        var exceptions: [SkipSentryException] = []
+        for exception in event.exceptions ?? [] {
+            exceptions.append(SkipSentryException(type: exception.type, value: exception.value))
+        }
+        let wrapper = SkipSentryEvent(message: event.message?.formatted, level: fromKotlinLevel(event.level), exceptions: exceptions)
+        return beforeSend(wrapper) == nil ? nil : event
     }
 
     /// Convert a Swift Error to a Java Throwable using Skip's standard error bridging.
@@ -349,10 +432,14 @@ public class SkipSentry {
         // SKIP INSERT:     opts.release?.let { options.release = it }
         // SKIP INSERT:     opts.dist?.let { options.dist = it }
         // SKIP INSERT:     opts.sampleRate?.let { options.sampleRate = it }
+        // SKIP INSERT:     opts.tracesSampleRate?.let { options.tracesSampleRate = it }
         // SKIP INSERT:     options.isEnableAutoSessionTracking = opts.enableAutoSessionTracking
         // SKIP INSERT:     opts.sessionTrackingIntervalMillis?.let { options.sessionTrackingIntervalMillis = it.toLong() }
         // SKIP INSERT:     options.isAttachStacktrace = opts.attachStacktrace
         // SKIP INSERT:     options.isReportHistoricalTombstones = opts.isReportHistoricalTombstones
+        // SKIP INSERT:     if (opts.beforeSend != null) {
+        // SKIP INSERT:         options.setBeforeSend { event, _ -> applyBeforeSend(opts, event) }
+        // SKIP INSERT:     }
         // SKIP INSERT: }
     }
     #endif
@@ -374,6 +461,10 @@ public class SkipSentryOptions {
     public var dist: String?
     /// Sample rate for error events (0.0 to 1.0). Default sends all events.
     public var sampleRate: Double?
+    /// Sample rate for performance/tracing transactions (0.0 to 1.0). `nil`
+    /// leaves tracing disabled. Mirrors iOS `Options.tracesSampleRate` and
+    /// Android `SentryOptions.tracesSampleRate`.
+    public var tracesSampleRate: Double?
     /// Whether to automatically track sessions.
     public var enableAutoSessionTracking: Bool = true
     /// Session tracking interval in milliseconds.
@@ -385,7 +476,81 @@ public class SkipSentryOptions {
     /// Whether to report tombstones captured before the SDK was initialized (Android 12+ only).
     public var isReportHistoricalTombstones: Bool = true
 
+    /// A hook invoked for each event just before it is sent to Sentry, letting you
+    /// inspect the event and decide whether to drop it (client-side noise filtering).
+    /// Return the event to send it, or `nil` to drop it.
+    ///
+    /// The closure receives a lightweight, read-only ``SkipSentryEvent`` — a
+    /// cross-platform projection of the native event — because the native event
+    /// types (`Sentry.Event` on iOS, `io.sentry.SentryEvent` on Android) are
+    /// platform-specific and cannot cross the Skip bridge. The hook can therefore
+    /// decide keep-or-drop but does not mutate the outgoing event.
+    ///
+    /// Mirrors iOS `Options.beforeSend` and Android `SentryOptions.setBeforeSend`.
+    ///
+    /// ```swift
+    /// let noise = ["network request failed", "request was cancelled"]
+    /// SkipSentry.start { options in
+    ///     options.dsn = "https://key@sentry.io/123"
+    ///     options.beforeSend = { event in
+    ///         var text = (event.message ?? "").lowercased()
+    ///         for value in event.exceptionValues {
+    ///             text += " " + value.lowercased()
+    ///         }
+    ///         return noise.contains(where: { text.contains($0) }) ? nil : event
+    ///     }
+    /// }
+    /// ```
+    public var beforeSend: ((SkipSentryEvent) -> SkipSentryEvent?)?
+
     public init() { }
+}
+
+// MARK: - SkipSentryEvent
+
+/// A lightweight, cross-platform, read-only projection of a Sentry event,
+/// passed to ``SkipSentryOptions/beforeSend`` so you can inspect an event and
+/// decide whether to drop it before it is sent.
+///
+/// The underlying native event types (`Sentry.Event` on iOS,
+/// `io.sentry.SentryEvent` on Android) are platform-specific and cannot cross
+/// the Skip bridge, so `beforeSend` works with this wrapper. It carries the
+/// fields needed for client-side noise filtering; it cannot mutate the event.
+public struct SkipSentryEvent {
+    /// The event's formatted message, if any. Present for message events (e.g.
+    /// `SkipSentry.capture(message:)`); typically `nil` for pure exception events.
+    public var message: String?
+    /// The severity level of the event, if known.
+    public var level: SkipSentryLevel?
+    /// The exceptions attached to the event. Empty for pure message events.
+    public var exceptions: [SkipSentryException]
+
+    /// Convenience accessor for the non-nil `value` strings of all attached exceptions.
+    public var exceptionValues: [String] {
+        exceptions.compactMap { $0.value }
+    }
+
+    public init(message: String? = nil, level: SkipSentryLevel? = nil, exceptions: [SkipSentryException] = []) {
+        self.message = message
+        self.level = level
+        self.exceptions = exceptions
+    }
+}
+
+// MARK: - SkipSentryException
+
+/// A lightweight, read-only projection of a single exception within a
+/// ``SkipSentryEvent``.
+public struct SkipSentryException {
+    /// The exception type / class name (e.g. `"NSURLErrorDomain"`), if known.
+    public var type: String?
+    /// The exception value / message, if known.
+    public var value: String?
+
+    public init(type: String? = nil, value: String? = nil) {
+        self.type = type
+        self.value = value
+    }
 }
 
 #endif

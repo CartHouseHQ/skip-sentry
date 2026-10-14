@@ -29,6 +29,18 @@ let package = Package(
 
 Create a [Sentry](https://sentry.io) project and obtain your DSN from **Settings > Projects > [Your Project] > Client Keys (DSN)**.
 
+### Android: disable auto-init
+
+SkipSentry initializes manually via `SkipSentry.start { … }`. The Sentry Android SDK, however, ships a `SentryInitProvider` that **auto-initializes at process start** — before your manual `start` runs. Because the DSN is provided in code (not as manifest metadata), this auto-init aborts the app on launch with `java.lang.IllegalArgumentException: DSN is required`.
+
+Disable it by adding this to your app's `AndroidManifest.xml`, inside `<application>`:
+
+```xml
+<meta-data android:name="io.sentry.auto-init" android:value="false" />
+```
+
+This must live in the **consuming app's** manifest — a `meta-data` entry in this module's manifest does not propagate into the merged app manifest. See Sentry's [manual initialization](https://docs.sentry.io/platforms/android/configuration/manual-init/) docs.
+
 ## Usage
 
 ### Initialization
@@ -70,6 +82,35 @@ SkipSentry.start { options in
     options.enableAppHangTracking = true         // iOS only
 }
 ```
+
+### Filtering Events Before They're Sent
+
+Use `beforeSend` to inspect each event on-device and decide whether to drop it —
+for example, to filter out expected, non-actionable client-side noise (cancelled
+in-flight requests, transient offline blips, user-cancelled auth sheets) before it
+becomes a Sentry issue. Return the event to send it, or `nil` to drop it.
+
+```swift
+let noise = ["network request failed", "request was cancelled"]
+
+SkipSentry.start { options in
+    options.dsn = "https://examplePublicKey@o0.ingest.sentry.io/0"
+    options.beforeSend = { event in
+        var text = (event.message ?? "").lowercased()
+        for value in event.exceptionValues {
+            text += " " + value.lowercased()
+        }
+        return noise.contains(where: { text.contains($0) }) ? nil : event
+    }
+}
+```
+
+The closure receives a lightweight, read-only `SkipSentryEvent` — a cross-platform
+projection of the native event (its `message`, `level`, and `exceptions`, plus the
+`exceptionValues` convenience). The native event types (`Sentry.Event` on iOS,
+`io.sentry.SentryEvent` on Android) are platform-specific and can't cross the Skip
+bridge, so the hook decides keep-or-drop rather than mutating the event. This mirrors
+iOS `Options.beforeSend` and Android `SentryOptions.setBeforeSend`.
 
 ### Capturing Errors
 
@@ -211,6 +252,7 @@ All methods are static on the `SkipSentry` class.
 | `sessionTrackingIntervalMillis` | `Int?` | `nil` | Session tracking interval (ms) |
 | `attachStacktrace` | `Bool` | `true` | Attach stack traces to events |
 | `enableAppHangTracking` | `Bool` | `true` | Detect app hangs (iOS only) |
+| `beforeSend` | `((SkipSentryEvent) -> SkipSentryEvent?)?` | `nil` | Inspect each event and drop it (return `nil`) or send it (return the event) |
 
 ### SkipSentryLevel
 
