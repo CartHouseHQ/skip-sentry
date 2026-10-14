@@ -90,21 +90,20 @@ public class SkipSentry {
             }
             options.attachStacktrace = opts.attachStacktrace
             options.enableAppHangTracking = opts.enableAppHangTracking
-            if let rate = opts.tracesSampleRate { options.tracesSampleRate = NSNumber(value: rate) }
             options.enableLogs = opts.enableLogs
             options.enableMetrics = opts.enableMetrics
             if let targets = opts.tracePropagationTargets { options.tracePropagationTargets = targets }
             let droppedHosts = opts.droppedFailedRequestHosts
-            if !droppedHosts.isEmpty {
+            if !droppedHosts.isEmpty || opts.beforeSend != nil {
                 options.beforeSend = { event in
-                    isDroppedFailedRequest(
+                    if isDroppedFailedRequest(
                         exceptionType: event.exceptions?.first?.type,
                         requestURL: event.request?.url,
                         droppedHosts: droppedHosts
-                    ) ? nil : event
-            if opts.beforeSend != nil {
-                options.beforeSend = { event in
-                    Self.applyBeforeSend(opts, event)
+                    ) {
+                        return nil
+                    }
+                    return Self.applyBeforeSend(opts, event)
                 }
             }
         }
@@ -524,7 +523,6 @@ public class SkipSentry {
         }
         let wrapper = SkipSentryEvent(message: event.message?.formatted, level: fromiOSLevel(event.level), exceptions: exceptions)
         return beforeSend(wrapper) == nil ? nil : event
-
     }
     #else
     private static func toKotlinLogLevel(_ level: SkipSentryLogLevel) -> SentryLogLevel {
@@ -607,16 +605,13 @@ public class SkipSentry {
         // SKIP INSERT:     opts.sessionTrackingIntervalMillis?.let { options.sessionTrackingIntervalMillis = it.toLong() }
         // SKIP INSERT:     options.isAttachStacktrace = opts.attachStacktrace
         // SKIP INSERT:     options.isReportHistoricalTombstones = opts.isReportHistoricalTombstones
-        // SKIP INSERT:     opts.tracesSampleRate?.let { options.tracesSampleRate = it }
         // SKIP INSERT:     options.logs.isEnabled = opts.enableLogs
         // SKIP INSERT:     options.metrics.isEnabled = opts.enableMetrics
         // SKIP INSERT:     opts.tracePropagationTargets?.let { options.setTracePropagationTargets(it.kotlin(nocopy = true).map { t -> t as String }) }
-        // SKIP INSERT:     if (hasDroppedHosts) {
-        // SKIP INSERT:         options.beforeSend = io.sentry.SentryOptions.BeforeSendCallback { event, _ ->
-        // SKIP INSERT:             if (isDroppedFailedRequest(event.exceptions?.firstOrNull()?.type, event.request?.url, droppedHosts)) null else event
+        // SKIP INSERT:     if (hasDroppedHosts || opts.beforeSend != null) {
+        // SKIP INSERT:         options.setBeforeSend { event, _ ->
+        // SKIP INSERT:             if (isDroppedFailedRequest(event.exceptions?.firstOrNull()?.type, event.request?.url, droppedHosts)) null else applyBeforeSend(opts, event)
         // SKIP INSERT:         }
-        // SKIP INSERT:     if (opts.beforeSend != null) {
-        // SKIP INSERT:         options.setBeforeSend { event, _ -> applyBeforeSend(opts, event) }
         // SKIP INSERT:     }
         // SKIP INSERT: }
     }
@@ -653,8 +648,6 @@ public class SkipSentryOptions {
     public var enableAppHangTracking: Bool = true
     /// Whether to report tombstones captured before the SDK was initialized (Android 12+ only).
     public var isReportHistoricalTombstones: Bool = true
-    /// Sample rate for performance traces (0.0 to 1.0). `nil` disables tracing.
-    public var tracesSampleRate: Double?
     /// Whether to send structured logs (``SkipSentry/log(_:level:attributes:)``) to Sentry.
     public var enableLogs: Bool = false
     /// Whether to send metrics (``SkipSentry/count(_:value:attributes:)`` and friends) to Sentry.
